@@ -6,7 +6,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── CONFIG ──
 const config = {
   TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN,
   GROQ_API_KEY: process.env.GROQ_API_KEY,
@@ -14,10 +13,20 @@ const config = {
   PORT: process.env.PORT || 3000,
 };
 
-// ── TELEGRAM BOT ──
 const bot = new TelegramBot(config.TELEGRAM_TOKEN, { polling: true });
 
-// ── SKILL LOADER ──
+function cleanText(text) {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/_(.*?)_/g, '$1')
+    .replace(/`{3}[\s\S]*?`{3}/g, '')
+    .replace(/`(.*?)`/g, '$1')
+    .replace(/#{1,6} /g, '')
+    .trim();
+}
+
 const skills = new Map();
 
 async function loadSkill(githubUrl) {
@@ -26,29 +35,16 @@ async function loadSkill(githubUrl) {
       .replace('github.com', 'raw.githubusercontent.com')
       .replace('/tree/main', '')
       .replace('/tree/master', '') + '/main/SKILL.md';
-
     const res = await fetch(rawUrl);
     if (!res.ok) throw new Error('Skill tidak ditemukan');
     const content = await res.text();
-
     const nameMatch = content.match(/name:\s*(.+)/);
     const name = nameMatch ? nameMatch[1].trim() : githubUrl.split('/').pop();
-
     skills.set(name, { url: githubUrl, content, active: true });
     return { success: true, name };
   } catch (e) {
     return { success: false, error: e.message };
   }
-}
-
-function getActiveSkillsContext() {
-  let context = '';
-  for (const [name, skill] of skills) {
-    if (skill.active) {
-      context += `\n\n=== SKILL: ${name} ===\n${skill.content.slice(0, 2000)}`;
-    }
-  }
-  return context;
 }
 
 async function loadDefaultSkills() {
@@ -59,180 +55,109 @@ async function loadDefaultSkills() {
     'https://github.com/herviana/morse-translator',
     'https://github.com/herviana/caesar-cipher-plus4',
   ];
-
   for (const url of defaultSkills) {
     await loadSkill(url);
   }
-  console.log('✅ Default skills loaded:', skills.size);
+  console.log('Skills loaded: ' + skills.size);
 }
 
-// ── AI AGENT (Groq - GRATIS) ──
 const conversations = new Map();
 
 async function chat(userId, userMessage) {
-  if (!conversations.has(userId)) {
-    conversations.set(userId, []);
-  }
-
+  if (!conversations.has(userId)) conversations.set(userId, []);
   const history = conversations.get(userId);
   history.push({ role: 'user', content: userMessage });
-
   if (history.length > 20) history.splice(0, history.length - 20);
 
-  const skillsContext = getActiveSkillsContext();
-
-  const systemPrompt = `Kamu adalah HervBot, AI trading agent crypto yang cerdas.
-Kamu memiliki kemampuan trading nyata di BNB Chain, Solana, dan Base.
-
-SKILL YANG AKTIF:
-${skillsContext}
-
-KEMAMPUAN:
-- Analisis teknikal (RSI, EMA, Volume, MACD)
-- Scan meme coin dan trending token
-- Eksekusi swap via DEX (Jupiter untuk Solana, PancakeSwap untuk BNB)
-- Manajemen risiko otomatis
-- Encode/decode morse dan Caesar cipher
-
-ATURAN TRADING:
-- Selalu cek keamanan token sebelum beli
-- Gunakan stop loss
-- Max per trade sesuai budget yang diset
-- Laporkan setiap transaksi dengan hash
-
-Gunakan bahasa Indonesia yang santai. Berikan analisis konkret.`;
+  const systemPrompt = 'Kamu adalah HervBot, AI trading agent crypto. Bantu analisis trading di BNB Chain, Solana, dan Base. PENTING: Jangan gunakan karakter Markdown seperti bintang, underscore, atau backtick dalam jawabanmu. Tulis teks biasa saja. Gunakan bahasa Indonesia santai.';
 
   try {
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.GROQ_API_KEY}`,
+        'Authorization': 'Bearer ' + config.GROQ_API_KEY,
       },
       body: JSON.stringify({
         model: 'llama3-70b-8192',
-        max_tokens: 1000,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...history,
-        ],
+        max_tokens: 800,
+        messages: [{ role: 'system', content: systemPrompt }, ...history],
       }),
     });
-
     if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Groq API error: ${errText}`);
+      const err = await response.text();
+      throw new Error(err);
     }
-
     const data = await response.json();
-    const reply = data.choices[0].message.content;
+    const reply = cleanText(data.choices[0].message.content);
     history.push({ role: 'assistant', content: reply });
     return reply;
   } catch (e) {
-    return `❌ Error: ${e.message}`;
+    return 'Error: ' + e.message;
   }
 }
 
-// ── TELEGRAM HANDLERS ──
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  const welcome = `⚡ *Selamat datang di HervBot!*
-
-AI Trading Agent crypto yang siap membantu kamu trading di:
-• BNB Chain
-• Solana  
-• Base
-
-*Perintah:*
-/scan - Scan meme coin terbaik
-/scalping - Cari peluang scalping
-/trending - Token trending di X
-/posisi - Cek posisi aktif
-/laporan - Laporan trading hari ini
-/skills - Kelola skill
-/help - Bantuan
-
-Atau ketik langsung pertanyaanmu! 😊`;
-
-  bot.sendMessage(chatId, welcome, { parse_mode: 'Markdown' });
+  bot.sendMessage(chatId,
+    'HervBot - AI Trading Agent Crypto\n\n' +
+    'Siap membantu trading di BNB Chain, Solana, dan Base.\n\n' +
+    'Perintah:\n' +
+    '/scan - Scan meme coin terbaik\n' +
+    '/scalping - Cari peluang scalping\n' +
+    '/trending - Token trending\n' +
+    '/posisi - Cek posisi aktif\n' +
+    '/laporan - Laporan trading\n' +
+    '/help - Bantuan\n\n' +
+    'Atau ketik langsung pertanyaanmu!'
+  );
 });
 
 bot.onText(/\/scan/, async (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, '🔍 Scanning meme coin terbaik...');
-  const reply = await chat(chatId, 'Scan meme coin terbaik di BNB chain dan Solana sekarang. Gunakan semua filter keamanan. Berikan top 3 rekomendasi.');
-  bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
+  bot.sendMessage(chatId, 'Scanning meme coin terbaik...');
+  const reply = await chat(chatId, 'Scan meme coin terbaik di Solana dan BNB Chain. Berikan top 3 rekomendasi dengan alasan singkat.');
+  bot.sendMessage(chatId, reply);
 });
 
 bot.onText(/\/scalping/, async (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, '⚡ Mencari peluang scalping...');
-  const reply = await chat(chatId, 'Cari koin terbaik untuk scalping hari ini. Analisis RSI, EMA, dan volume. Berikan entry, target, dan stop loss.');
-  bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
+  bot.sendMessage(chatId, 'Mencari peluang scalping...');
+  const reply = await chat(chatId, 'Cari koin terbaik untuk scalping hari ini. Berikan entry, target, dan stop loss.');
+  bot.sendMessage(chatId, reply);
 });
 
 bot.onText(/\/trending/, async (msg) => {
   const chatId = msg.chat.id;
-  bot.sendMessage(chatId, '🔥 Menganalisis trending di X...');
-  const reply = await chat(chatId, 'Koin apa yang trending di X/Twitter hari ini? Berikan skor trending dan analisis sentimen.');
-  bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
-});
-
-bot.onText(/\/skills/, async (msg) => {
-  const chatId = msg.chat.id;
-  let skillList = '⚡ *Daftar Skill:*\n\n';
-  for (const [name, skill] of skills) {
-    skillList += `${skill.active ? '✅' : '❌'} *${name}*\n\`${skill.url}\`\n\n`;
-  }
-  skillList += '\nUntuk install skill baru:\n`/install github.com/username/skill-name`';
-  bot.sendMessage(chatId, skillList, { parse_mode: 'Markdown' });
-});
-
-bot.onText(/\/install (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const url = match[1].trim();
-  bot.sendMessage(chatId, `📦 Installing skill dari ${url}...`);
-  const result = await loadSkill(url.startsWith('http') ? url : 'https://' + url);
-  if (result.success) {
-    bot.sendMessage(chatId, `✅ Skill *${result.name}* berhasil diinstall!`, { parse_mode: 'Markdown' });
-  } else {
-    bot.sendMessage(chatId, `❌ Gagal install: ${result.error}`);
-  }
+  bot.sendMessage(chatId, 'Menganalisis trending...');
+  const reply = await chat(chatId, 'Koin apa yang trending hari ini? Berikan analisis sentimen singkat.');
+  bot.sendMessage(chatId, reply);
 });
 
 bot.onText(/\/laporan/, async (msg) => {
   const chatId = msg.chat.id;
-  const reply = await chat(chatId, 'Tampilkan laporan lengkap trading hari ini. Berikan total profit/loss, win rate, dan posisi aktif.');
-  bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
+  const reply = await chat(chatId, 'Tampilkan laporan trading hari ini dengan total profit/loss dan win rate.');
+  bot.sendMessage(chatId, reply);
 });
 
 bot.onText(/\/posisi/, async (msg) => {
   const chatId = msg.chat.id;
-  const reply = await chat(chatId, 'Tampilkan semua posisi trading yang sedang aktif sekarang beserta PnL masing-masing.');
-  bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
+  const reply = await chat(chatId, 'Tampilkan semua posisi trading aktif beserta PnL masing-masing.');
+  bot.sendMessage(chatId, reply);
 });
 
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
-  const help = `📖 *Daftar Perintah HervBot:*
-
-*Trading:*
-/scan - Scan meme coin terbaik
-/scalping - Cari peluang scalping
-/trending - Token trending di X
-/posisi - Cek posisi aktif
-/laporan - Laporan trading
-
-*Skills:*
-/skills - Lihat semua skill
-/install [url] - Install skill baru
-
-*Lainnya:*
-/start - Mulai bot
-/help - Bantuan ini
-
-Atau ketik langsung pertanyaanmu dalam bahasa Indonesia! 😊`;
-  bot.sendMessage(chatId, help, { parse_mode: 'Markdown' });
+  bot.sendMessage(chatId,
+    'Daftar Perintah HervBot:\n\n' +
+    '/scan - Scan meme coin terbaik\n' +
+    '/scalping - Cari peluang scalping\n' +
+    '/trending - Token trending\n' +
+    '/posisi - Cek posisi aktif\n' +
+    '/laporan - Laporan trading\n' +
+    '/start - Mulai ulang\n\n' +
+    'Atau ketik langsung pertanyaanmu!'
+  );
 });
 
 bot.on('message', async (msg) => {
@@ -240,33 +165,14 @@ bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     bot.sendChatAction(chatId, 'typing');
     const reply = await chat(chatId, msg.text);
-    bot.sendMessage(chatId, reply, { parse_mode: 'Markdown' });
+    bot.sendMessage(chatId, reply);
   }
 });
 
-// ── REST API ──
-app.post('/api/chat', async (req, res) => {
-  const { userId, message } = req.body;
-  if (!userId || !message) return res.status(400).json({ error: 'Missing params' });
-  const reply = await chat(userId, message);
-  res.json({ reply });
-});
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
-app.get('/api/skills', (req, res) => {
-  const list = [];
-  for (const [name, skill] of skills) {
-    list.push({ name, url: skill.url, active: skill.active });
-  }
-  res.json(list);
-});
-
-app.get('/health', (req, res) => res.json({ status: 'ok', skills: skills.size }));
-
-// ── START ──
 loadDefaultSkills().then(() => {
   app.listen(config.PORT, () => {
-    console.log(`🚀 HervBot running on port ${config.PORT}`);
-    console.log(`📱 Telegram bot active`);
-    console.log(`🌐 API ready`);
+    console.log('HervBot running on port ' + config.PORT);
   });
 });
