@@ -1,24 +1,16 @@
 {
   "name": "hervbot",
   "version": "1.0.0",
-  "description": "AI Trading Agent - Solana DEX Trading Bot",
+  "type": "module",
   "main": "index.js",
-  "type": "commonjs",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "node-telegram-bot-api": "^0.65.1",
-    "bs58": "^5.0.0",
-    "@solana/web3.js": "^1.91.0"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "@solana/web3.js": "^1.95.0",
+    "axios": "^1.7.0",
+    "bs58": "^6.0.0",
+    "node-telegram-bot-api": "^0.66.1",
+    "express": "^4.19.0"
   }
 }
