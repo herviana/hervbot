@@ -1,6 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const TelegramBot = require('node-telegram-bot-api');
+const { Connection, PublicKey, Keypair, VersionedTransaction } = require('@solana/web3.js');
+const bs58 = require('bs58');
+const axios = require('axios');
+const { getMint } = require('@solana/spl-token');
 
 const app = express();
 app.use(cors());
@@ -10,625 +14,224 @@ const config = {
   TELEGRAM_TOKEN: process.env.TELEGRAM_TOKEN,
   GROQ_API_KEY: process.env.GROQ_API_KEY,
   WALLET_PRIVATE_KEY: process.env.WALLET_PRIVATE_KEY,
+  SOLANA_RPC: process.env.SOLANA_RPC,
+  SLIPPAGE_BPS: parseInt(process.env.SLIPPAGE_BPS) || 50,
   PORT: process.env.PORT || 3000,
 };
 
-const bot = new TelegramBot(config.TELEGRAM_TOKEN, { polling: true });
+// ====================== SOLANA SETUP ======================
+const connection = new Connection(config.SOLANA_RPC, 'confirmed');
+let wallet = null;
 
-const settings = {
-  maxBudgetPerTrade: 5,
-  slippage: 1,
-  autoTrade: false,
-};
-
-function cleanText(text) {
-  return text
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/\*(.*?)\*/g, '$1')
-    .replace(/__(.*?)__/g, '$1')
-    .replace(/_(.*?)_/g, '$1')
-    .replace(/`{3}[\s\S]*?`{3}/g, '')
-    .replace(/`(.*?)`/g, '$1')
-    .replace(/#{1,6} /g, '')
-    .trim();
-}
-
-// ── SOLANA: dynamic import untuk hindari crash ──
-let solanaLoaded = false;
-let Connection, PublicKey, Keypair, Transaction, VersionedTransaction;
-let bs58;
-
-async function loadSolana() {
-  if (solanaLoaded) return true;
+if (config.WALLET_PRIVATE_KEY) {
   try {
-    const solana = await import('@solana/web3.js');
-    Connection = solana.Connection;
-    PublicKey = solana.PublicKey;
-    Keypair = solana.Keypair;
-    Transaction = solana.Transaction;
-    VersionedTransaction = solana.VersionedTransaction;
-    const bs58Module = await import('bs58');
-    bs58 = bs58Module.default;
-    solanaLoaded = true;
-    console.log('Solana library loaded successfully');
-    return true;
+    const secretKey = bs58.decode(config.WALLET_PRIVATE_KEY);
+    wallet = Keypair.fromSecretKey(secretKey);
+    console.log("✅ Wallet loaded:", wallet.publicKey.toString().slice(0, 12) + "...");
   } catch (e) {
-    console.log('Solana load error: ' + e.message);
-    return false;
+    console.error("❌ Gagal load wallet:", e.message);
   }
 }
 
-function getKeypair() {
+// ====================== HELPER FUNCTIONS ======================
+async function getTokenDecimals(mintAddress) {
   try {
-    const decoded = bs58.decode(config.WALLET_PRIVATE_KEY);
-    return Keypair.fromSecretKey(decoded);
-  } catch (e) {
-    return null;
+    const mintPubkey = new PublicKey(mintAddress);
+    const mintInfo = await getMint(connection, mintPubkey);
+    return mintInfo.decimals;
+  } catch {
+    return 9;
   }
-}
-
-function getPublicKey() {
-  try {
-    const keypair = getKeypair();
-    return keypair ? keypair.publicKey.toString() : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-// ── JUPITER DEX ──
-const JUPITER_API = 'https://quote-api.jup.ag/v6';
-const SOL_MINT = 'So11111111111111111111111111111111111111112';
-const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
-const RPC_URL = 'https://api.mainnet-beta.solana.com';
-
-async function getSolPrice() {
-  try {
-    const res = await fetch('https://price.jup.ag/v4/price?ids=' + SOL_MINT);
-    const data = await res.json();
-    return data.data[SOL_MINT]?.price || 0;
-  } catch (e) { return 0; }
 }
 
 async function getTokenPrice(mint) {
   try {
-    const res = await fetch('https://price.jup.ag/v4/price?ids=' + mint);
-    const data = await res.json();
-    return data.data[mint]?.price || 0;
-  } catch (e) { return 0; }
-}
-
-async function searchToken(symbol) {
-  try {
-    const res = await fetch('https://token.jup.ag/all');
-    const tokens = await res.json();
-    return tokens.filter(t =>
-      t.symbol.toLowerCase() === symbol.toLowerCase()
-    ).slice(0, 3);
-  } catch (e) { return []; }
-}
-
-async function getWalletBalance(publicKey) {
-  try {
-    const res = await fetch(RPC_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        jsonrpc: '2.0', id: 1,
-        method: 'getBalance',
-        params: [publicKey],
-      }),
-    });
-    const data = await res.json();
-    const lamports = data.result?.value || 0;
-    const sol = lamports / 1e9;
-    const solPrice = await getSolPrice();
-    return { sol: sol.toFixed(4), usd: (sol * solPrice).toFixed(2) };
-  } catch (e) { return { sol: '0', usd: '0' }; }
-}
-
-async function getQuote(inputMint, outputMint, amountLamports) {
-  try {
-    const url = JUPITER_API + '/quote?inputMint=' + inputMint +
-      '&outputMint=' + outputMint +
-      '&amount=' + amountLamports +
-      '&slippageBps=' + (settings.slippage * 100);
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(await res.text());
-    return { success: true, quote: await res.json() };
-  } catch (e) {
-    return { success: false, error: e.message };
+    const address = mint.replace('$', '').trim();
+    const res = await axios.get(`https://api.birdeye.so/defi/price?address=${address}`);
+    return res.data?.data?.value ? Number(res.data.data.value).toFixed(6) : null;
+  } catch {
+    return null;
   }
 }
 
-async function executeJupiterSwap(quoteResponse, keypair) {
+async function getBalance() {
+  if (!wallet) return "❌ Wallet belum diatur";
   try {
-    // 1. Dapatkan swap transaction dari Jupiter
-    const swapRes = await fetch(JUPITER_API + '/swap', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        quoteResponse,
-        userPublicKey: keypair.publicKey.toString(),
-        wrapAndUnwrapSol: true,
-        dynamicComputeUnitLimit: true,
-        prioritizationFeeLamports: 'auto',
-      }),
-    });
-    if (!swapRes.ok) throw new Error(await swapRes.text());
-    const { swapTransaction } = await swapRes.json();
-
-    // 2. Decode transaction
-    const swapTransactionBuf = Buffer.from(swapTransaction, 'base64');
-    const connection = new Connection(RPC_URL, 'confirmed');
-
-    let transaction;
-    try {
-      transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-      transaction.sign([keypair]);
-    } catch (e) {
-      transaction = Transaction.from(swapTransactionBuf);
-      transaction.sign(keypair);
-    }
-
-    // 3. Kirim ke blockchain
-    const rawTransaction = transaction.serialize();
-    const txid = await connection.sendRawTransaction(rawTransaction, {
-      skipPreflight: true,
-      maxRetries: 3,
-    });
-
-    // 4. Konfirmasi
-    await connection.confirmTransaction(txid, 'confirmed');
-
-    return { success: true, txid };
+    const sol = await connection.getBalance(wallet.publicKey);
+    return (sol / 1_000_000_000).toFixed(4) + " SOL";
   } catch (e) {
-    return { success: false, error: e.message };
+    return "❌ Gagal cek saldo";
   }
 }
 
-// ── SKILL LOADER ──
-const skills = new Map();
+// ====================== JUPITER SWAP ======================
+async function executeSwap(inputMint, outputMint, amountIn, isBuy) {
+  if (!wallet) throw new Error("Wallet belum diatur");
 
-async function loadSkill(githubUrl) {
   try {
-    let url = githubUrl.trim().replace(/\/$/, '');
-    url = url.replace('https://', '').replace('http://', '');
-    const parts = url.replace('github.com/', '').split('/');
-    const owner = parts[0];
-    const repo = parts[1];
-    if (!owner || !repo) throw new Error('Format URL tidak valid');
+    const decimals = isBuy ? 9 : await getTokenDecimals(inputMint);
+    const amount = Math.floor(amountIn * Math.pow(10, decimals));
 
-    const branches = ['main', 'master'];
-    let content = null;
-    for (const branch of branches) {
-      const rawUrl = 'https://raw.githubusercontent.com/' + owner + '/' + repo + '/' + branch + '/SKILL.md';
-      try {
-        const res = await fetch(rawUrl);
-        if (res.ok) { content = await res.text(); break; }
-      } catch (e) {}
-    }
+    const quoteRes = await axios.get('https://quote-api.jup.ag/v6/quote', {
+      params: { inputMint, outputMint, amount, slippageBps: config.SLIPPAGE_BPS }
+    });
 
-    if (!content) throw new Error('File SKILL.md tidak ditemukan');
-    const nameMatch = content.match(/name:\s*(.+)/i);
-    const name = nameMatch ? nameMatch[1].trim() : repo;
-    skills.set(name, { url: 'https://github.com/' + owner + '/' + repo, content, active: true });
-    return { success: true, name };
-  } catch (e) {
-    return { success: false, error: e.message };
+    const swapRes = await axios.post('https://quote-api.jup.ag/v6/swap', {
+      quoteResponse: quoteRes.data,
+      userPublicKey: wallet.publicKey.toString(),
+      wrapAndUnwrapSol: true,
+      dynamicComputeUnitLimit: true,
+      prioritizationFeeLamports: "auto"
+    });
+
+    const transaction = VersionedTransaction.deserialize(
+      Buffer.from(swapRes.data.swapTransaction, 'base64')
+    );
+    transaction.sign([wallet]);
+
+    const txId = await connection.sendRawTransaction(transaction.serialize(), {
+      skipPreflight: false,
+      maxRetries: 3
+    });
+
+    return { 
+      success: true, 
+      txId: `https://solscan.io/tx/${txId}` 
+    };
+  } catch (error) {
+    console.error("Swap Error:", error.message);
+    return { success: false, error: error.message };
   }
 }
 
-// ── AI CHAT ──
+// ====================== TELEGRAM BOT ======================
+const bot = new TelegramBot(config.TELEGRAM_TOKEN, { polling: true });
+
+// AI Chat
 const conversations = new Map();
-
 async function chat(userId, userMessage) {
   if (!conversations.has(userId)) conversations.set(userId, []);
   const history = conversations.get(userId);
   history.push({ role: 'user', content: userMessage });
-  if (history.length > 20) history.splice(0, history.length - 20);
+  if (history.length > 15) history.splice(0, 2);
 
-  let skillsContext = '';
-  for (const [name, skill] of skills) {
-    if (skill.active) skillsContext += '\nSKILL ' + name + ':\n' + skill.content.slice(0, 1500);
-  }
-
-  const systemPrompt = 'Kamu adalah HervBot, AI trading agent crypto dengan kemampuan transaksi nyata di Solana via Jupiter DEX.' +
-    '\nSettings: Budget $' + settings.maxBudgetPerTrade + ' per trade, Slippage ' + settings.slippage + '%' +
-    '\nAuto trade: ' + (settings.autoTrade ? 'ON' : 'OFF') +
-    (skillsContext ? '\n\nSkill aktif:\n' + skillsContext : '') +
-    '\n\nJangan gunakan karakter Markdown. Tulis teks biasa saja. Bahasa Indonesia santai.';
+  const systemPrompt = 'Kamu adalah HervBot, AI Trading Agent Solana. Jawab dengan bahasa Indonesia yang santai dan jelas.';
 
   try {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer ' + config.GROQ_API_KEY,
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
-        max_tokens: 800,
+        model: 'llama3-70b-8192',
+        max_tokens: 700,
         messages: [{ role: 'system', content: systemPrompt }, ...history],
       }),
     });
-    if (!res.ok) throw new Error(await res.text());
-    const data = await res.json();
-    const reply = cleanText(data.choices[0].message.content);
-    history.push({ role: 'assistant', content: reply });
-    return reply;
+    const data = await response.json();
+    return data.choices[0].message.content.trim();
   } catch (e) {
-    return 'Error AI: ' + e.message;
+    return 'Maaf, AI sedang sibuk. Coba lagi nanti.';
   }
 }
 
-// ── TELEGRAM HANDLERS ──
+// ====================== COMMANDS ======================
 bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id,
-    'HervBot - AI Trading Agent Solana\n\n' +
-    'Perintah Trading Nyata:\n' +
-    '/buy [token] [USD] - Beli token di Solana\n' +
-    '/sell [token] [USD] - Jual token\n' +
-    '/swap [dari] [ke] [USD] - Swap token\n' +
-    '/harga [token] - Cek harga realtime\n' +
-    '/saldo - Cek saldo wallet\n\n' +
-    'Pengaturan:\n' +
-    '/budget [angka] - Set budget per trade\n' +
-    '/slippage [angka] - Set slippage %\n\n' +
-    'Analisis AI:\n' +
-    '/scan - Scan meme coin\n' +
-    '/scalping - Peluang scalping\n' +
-    '/trending - Token trending\n\n' +
-    'Budget aktif: $' + settings.maxBudgetPerTrade + '\n' +
-    'Slippage: ' + settings.slippage + '%'
+  const chatId = msg.chat.id;
+  bot.sendMessage(chatId, 
+    `🚀 *HervBot - AI Trading Agent Solana*\n\n` +
+    `Wallet : ${wallet ? '✅ Aktif' : '❌ Belum diatur'}\n` +
+    `RPC    : Helius\n\n` +
+    `Perintah Trading:\n` +
+    `/saldo\n` +
+    `/harga <token>\n` +
+    `/buy <token> <jumlah SOL>\n` +
+    `/sell <token> <jumlah token>\n\n` +
+    `Contoh:\n` +
+    `/harga $GRASS\n` +
+    `/buy $GRASS 0.5`
   );
-});
-
-bot.onText(/\/budget (.+)/, (msg, match) => {
-  const amount = parseFloat(match[1]);
-  if (isNaN(amount) || amount <= 0) {
-    bot.sendMessage(msg.chat.id, 'Format salah. Contoh: /budget 10');
-    return;
-  }
-  settings.maxBudgetPerTrade = amount;
-  bot.sendMessage(msg.chat.id, 'Budget per trade diset ke $' + amount);
-});
-
-bot.onText(/\/slippage (.+)/, (msg, match) => {
-  const slip = parseFloat(match[1]);
-  if (isNaN(slip) || slip <= 0 || slip > 50) {
-    bot.sendMessage(msg.chat.id, 'Slippage harus 0.1-50. Contoh: /slippage 1');
-    return;
-  }
-  settings.slippage = slip;
-  bot.sendMessage(msg.chat.id, 'Slippage diset ke ' + slip + '%');
 });
 
 bot.onText(/\/saldo/, async (msg) => {
-  const chatId = msg.chat.id;
-  const loaded = await loadSolana();
-  if (!loaded) {
-    bot.sendMessage(chatId, 'Solana library gagal load. Coba lagi.');
-    return;
-  }
-  bot.sendMessage(chatId, 'Mengecek saldo...');
-  const pubkey = getPublicKey();
-  if (!pubkey) {
-    bot.sendMessage(chatId, 'Gagal baca wallet. Cek WALLET_PRIVATE_KEY di Railway.');
-    return;
-  }
-  const balance = await getWalletBalance(pubkey);
-  bot.sendMessage(chatId,
-    'Saldo Wallet:\n\n' +
-    'SOL: ' + balance.sol + '\n' +
-    'USD: ~$' + balance.usd + '\n\n' +
-    'Alamat: ' + pubkey.slice(0, 6) + '...' + pubkey.slice(-6)
-  );
+  bot.sendMessage(msg.chat.id, "🔄 Mengecek saldo...");
+  const balance = await getBalance();
+  bot.sendMessage(msg.chat.id, `💼 Saldo Wallet:\n${balance}`);
 });
 
 bot.onText(/\/harga (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const symbol = match[1].trim().toUpperCase();
-  bot.sendMessage(chatId, 'Mencari harga ' + symbol + '...');
-  const tokens = await searchToken(symbol);
-  if (tokens.length === 0) {
-    bot.sendMessage(chatId, 'Token ' + symbol + ' tidak ditemukan.');
-    return;
-  }
-  const token = tokens[0];
-  const price = await getTokenPrice(token.address);
-  bot.sendMessage(chatId,
-    'Harga ' + token.symbol + ':\n\n' +
-    '$' + (price > 0.01 ? price.toFixed(4) : price.toFixed(8)) + '\n' +
-    'Nama: ' + token.name
-  );
+  const token = match[1].trim();
+  bot.sendMessage(msg.chat.id, `🔍 Mencari harga ${token}...`);
+  const price = await getTokenPrice(token);
+  bot.sendMessage(msg.chat.id, price ? `💰 ${token.toUpperCase()}: $${price}` : `❌ Harga ${token} tidak ditemukan`);
 });
 
 bot.onText(/\/buy (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const parts = match[1].trim().split(' ');
-  const symbol = parts[0].toUpperCase();
-  const amountUSD = parseFloat(parts[1]) || settings.maxBudgetPerTrade;
+  if (!wallet) return bot.sendMessage(chatId, "❌ Wallet belum diatur!");
 
-  if (amountUSD > settings.maxBudgetPerTrade) {
-    bot.sendMessage(chatId, 'Jumlah $' + amountUSD + ' melebihi budget $' + settings.maxBudgetPerTrade + '\nGunakan /budget untuk ubah limit.');
-    return;
+  const args = match[1].trim().split(/\s+/);
+  const token = args[0];
+  const amountSol = parseFloat(args[1]);
+
+  if (!token || !amountSol) {
+    return bot.sendMessage(chatId, "Format salah.\nContoh: `/buy $GRASS 0.5`");
   }
 
-  bot.sendMessage(chatId, 'Mencari ' + symbol + ' dan membuat quote...');
+  bot.sendMessage(chatId, `🔄 Sedang membeli ${token} dengan ${amountSol} SOL...`);
 
-  const loaded = await loadSolana();
-  if (!loaded) {
-    bot.sendMessage(chatId, 'Solana library gagal dimuat.');
-    return;
-  }
+  const SOL_MINT = "So11111111111111111111111111111111111111112";
+  const result = await executeSwap(SOL_MINT, token.replace('$',''), amountSol, true);
 
-  const tokens = await searchToken(symbol);
-  if (tokens.length === 0) {
-    bot.sendMessage(chatId, 'Token ' + symbol + ' tidak ditemukan di Solana.');
-    return;
-  }
-
-  const token = tokens[0];
-  const solPrice = await getSolPrice();
-  if (!solPrice) {
-    bot.sendMessage(chatId, 'Gagal ambil harga SOL. Coba lagi.');
-    return;
-  }
-
-  const solAmount = amountUSD / solPrice;
-  const lamports = Math.floor(solAmount * 1e9);
-
-  const quoteResult = await getQuote(SOL_MINT, token.address, lamports);
-  if (!quoteResult.success) {
-    bot.sendMessage(chatId, 'Gagal buat quote: ' + quoteResult.error);
-    return;
-  }
-
-  const outAmount = quoteResult.quote.outAmount / Math.pow(10, token.decimals || 6);
-
-  // Simpan pending trade
-  pendingTrades.set(chatId, {
-    type: 'buy',
-    token,
-    amountUSD,
-    lamports,
-    outAmount,
-    quote: quoteResult.quote,
-  });
-
-  bot.sendMessage(chatId,
-    'Konfirmasi Pembelian:\n\n' +
-    'Token: ' + token.symbol + ' (' + token.name + ')\n' +
-    'Bayar: $' + amountUSD + ' (' + solAmount.toFixed(4) + ' SOL)\n' +
-    'Dapat: ~' + outAmount.toFixed(4) + ' ' + token.symbol + '\n' +
-    'Slippage: ' + settings.slippage + '%\n\n' +
-    'Ketik /ya untuk eksekusi\n' +
-    'Ketik /tidak untuk batal'
-  );
-});
-
-bot.onText(/\/ya/, async (msg) => {
-  const chatId = msg.chat.id;
-  const pending = pendingTrades.get(chatId);
-
-  if (!pending) {
-    bot.sendMessage(chatId, 'Tidak ada transaksi yang menunggu konfirmasi.');
-    return;
-  }
-
-  bot.sendMessage(chatId, 'Mengeksekusi transaksi di Solana...');
-  pendingTrades.delete(chatId);
-
-  const keypair = getKeypair();
-  if (!keypair) {
-    bot.sendMessage(chatId, 'Gagal baca wallet. Cek WALLET_PRIVATE_KEY.');
-    return;
-  }
-
-  const result = await executeJupiterSwap(pending.quote, keypair);
-
-  if (result.success) {
-    bot.sendMessage(chatId,
-      'Transaksi BERHASIL!\n\n' +
-      'Token: ' + pending.token.symbol + '\n' +
-      'Jumlah: ~' + pending.outAmount.toFixed(4) + ' ' + pending.token.symbol + '\n' +
-      'TX Hash: ' + result.txid + '\n\n' +
-      'Cek di: solscan.io/tx/' + result.txid
-    );
-  } else {
-    bot.sendMessage(chatId, 'Transaksi GAGAL:\n' + result.error);
-  }
-});
-
-bot.onText(/\/tidak/, (msg) => {
-  pendingTrades.delete(msg.chat.id);
-  bot.sendMessage(msg.chat.id, 'Transaksi dibatalkan.');
+  bot.sendMessage(chatId, result.success 
+    ? `✅ Berhasil membeli \( {token}!\n \){result.txId}` 
+    : `❌ Gagal: ${result.error}`);
 });
 
 bot.onText(/\/sell (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
-  const parts = match[1].trim().split(' ');
-  const symbol = parts[0].toUpperCase();
-  const amountUSD = parseFloat(parts[1]) || settings.maxBudgetPerTrade;
+  if (!wallet) return bot.sendMessage(chatId, "❌ Wallet belum diatur!");
 
-  bot.sendMessage(chatId, 'Mencari ' + symbol + '...');
+  const args = match[1].trim().split(/\s+/);
+  const token = args[0];
+  const amount = parseFloat(args[1]);
 
-  const loaded = await loadSolana();
-  if (!loaded) { bot.sendMessage(chatId, 'Solana gagal dimuat.'); return; }
-
-  const tokens = await searchToken(symbol);
-  if (tokens.length === 0) { bot.sendMessage(chatId, 'Token tidak ditemukan.'); return; }
-
-  const token = tokens[0];
-  const tokenPrice = await getTokenPrice(token.address);
-  if (!tokenPrice) { bot.sendMessage(chatId, 'Gagal ambil harga token.'); return; }
-
-  const tokenAmount = amountUSD / tokenPrice;
-  const tokenLamports = Math.floor(tokenAmount * Math.pow(10, token.decimals || 6));
-
-  const quoteResult = await getQuote(token.address, SOL_MINT, tokenLamports);
-  if (!quoteResult.success) {
-    bot.sendMessage(chatId, 'Gagal buat quote: ' + quoteResult.error);
-    return;
+  if (!token || !amount) {
+    return bot.sendMessage(chatId, "Format salah.\nContoh: `/sell $GRASS 1000000`");
   }
 
-  const solOut = quoteResult.quote.outAmount / 1e9;
-  const solPrice = await getSolPrice();
+  bot.sendMessage(chatId, `🔄 Sedang menjual ${amount} ${token}...`);
 
-  pendingTrades.set(chatId, {
-    type: 'sell',
-    token,
-    amountUSD,
-    tokenLamports,
-    solOut,
-    quote: quoteResult.quote,
-  });
+  const SOL_MINT = "So11111111111111111111111111111111111111112";
+  const result = await executeSwap(token.replace('$',''), SOL_MINT, amount, false);
 
-  bot.sendMessage(chatId,
-    'Konfirmasi Penjualan:\n\n' +
-    'Jual: ' + tokenAmount.toFixed(4) + ' ' + token.symbol + '\n' +
-    'Nilai: ~$' + amountUSD + '\n' +
-    'Dapat: ~' + solOut.toFixed(4) + ' SOL (~$' + (solOut * solPrice).toFixed(2) + ')\n' +
-    'Slippage: ' + settings.slippage + '%\n\n' +
-    'Ketik /ya untuk eksekusi\n' +
-    'Ketik /tidak untuk batal'
-  );
+  bot.sendMessage(chatId, result.success 
+    ? `✅ Berhasil menjual \( {token}!\n \){result.txId}` 
+    : `❌ Gagal: ${result.error}`);
 });
 
-bot.onText(/\/swap (.+) (.+) (.+)/, async (msg, match) => {
+// AI Commands
+bot.onText(/\/scan|\/scalping|\/trending/, async (msg) => {
   const chatId = msg.chat.id;
-  const fromSymbol = match[1].toUpperCase();
-  const toSymbol = match[2].toUpperCase();
-  const amountUSD = parseFloat(match[3]) || settings.maxBudgetPerTrade;
-
-  bot.sendMessage(chatId, 'Mencari quote swap ' + fromSymbol + ' ke ' + toSymbol + '...');
-
-  const loaded = await loadSolana();
-  if (!loaded) { bot.sendMessage(chatId, 'Solana gagal dimuat.'); return; }
-
-  const fromTokens = fromSymbol === 'SOL' ? [{ address: SOL_MINT, symbol: 'SOL', decimals: 9 }] : await searchToken(fromSymbol);
-  const toTokens = toSymbol === 'SOL' ? [{ address: SOL_MINT, symbol: 'SOL', decimals: 9 }] : await searchToken(toSymbol);
-
-  if (fromTokens.length === 0 || toTokens.length === 0) {
-    bot.sendMessage(chatId, 'Token tidak ditemukan.'); return;
-  }
-
-  const fromToken = fromTokens[0];
-  const toToken = toTokens[0];
-
-  const fromPrice = await getTokenPrice(fromToken.address);
-  const fromAmount = amountUSD / (fromPrice || 1);
-  const fromLamports = Math.floor(fromAmount * Math.pow(10, fromToken.decimals || 9));
-
-  const quoteResult = await getQuote(fromToken.address, toToken.address, fromLamports);
-  if (!quoteResult.success) {
-    bot.sendMessage(chatId, 'Gagal buat quote: ' + quoteResult.error); return;
-  }
-
-  const toAmount = quoteResult.quote.outAmount / Math.pow(10, toToken.decimals || 6);
-
-  pendingTrades.set(chatId, {
-    type: 'swap',
-    fromToken, toToken, amountUSD, toAmount,
-    quote: quoteResult.quote,
-  });
-
-  bot.sendMessage(chatId,
-    'Konfirmasi Swap:\n\n' +
-    'Dari: ' + fromAmount.toFixed(4) + ' ' + fromToken.symbol + '\n' +
-    'Ke: ~' + toAmount.toFixed(4) + ' ' + toToken.symbol + '\n' +
-    'Nilai: ~$' + amountUSD + '\n' +
-    'Slippage: ' + settings.slippage + '%\n\n' +
-    'Ketik /ya untuk eksekusi\n' +
-    'Ketik /tidak untuk batal'
-  );
-});
-
-bot.onText(/\/scan/, async (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Scanning meme coin terbaik...');
-  const reply = await chat(chatId, 'Scan meme coin terbaik di Solana. Berikan top 3 dengan entry point dan stop loss.');
+  bot.sendChatAction(chatId, 'typing');
+  const reply = await chat(chatId, msg.text);
   bot.sendMessage(chatId, reply);
-});
-
-bot.onText(/\/scalping/, async (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Mencari peluang scalping...');
-  const reply = await chat(chatId, 'Cari koin terbaik untuk scalping. Berikan entry, target profit, dan stop loss.');
-  bot.sendMessage(chatId, reply);
-});
-
-bot.onText(/\/trending/, async (msg) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Menganalisis trending...');
-  const reply = await chat(chatId, 'Koin apa yang trending sekarang? Berikan analisis sentimen dan potensi.');
-  bot.sendMessage(chatId, reply);
-});
-
-bot.onText(/\/skills/, async (msg) => {
-  const chatId = msg.chat.id;
-  if (skills.size === 0) {
-    bot.sendMessage(chatId, 'Belum ada skill.\n\nInstall: /install https://github.com/username/repo');
-    return;
-  }
-  let list = 'Skill aktif (' + skills.size + '):\n\n';
-  for (const [name, skill] of skills) {
-    list += 'AKTIF - ' + name + '\n' + skill.url + '\n\n';
-  }
-  bot.sendMessage(chatId, list);
-});
-
-bot.onText(/\/install (.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  bot.sendMessage(chatId, 'Menginstall skill...');
-  const result = await loadSkill(match[1].trim());
-  if (result.success) {
-    bot.sendMessage(chatId, 'Skill ' + result.name + ' berhasil diinstall!');
-  } else {
-    bot.sendMessage(chatId, 'Gagal install: ' + result.error);
-  }
-});
-
-bot.onText(/\/help/, (msg) => {
-  bot.sendMessage(msg.chat.id,
-    'Perintah HervBot:\n\n' +
-    'Trading:\n' +
-    '/buy [token] [USD] - Beli token\n' +
-    '/sell [token] [USD] - Jual token\n' +
-    '/swap [dari] [ke] [USD] - Swap\n' +
-    '/harga [token] - Cek harga\n' +
-    '/saldo - Cek saldo\n' +
-    '/ya - Konfirmasi transaksi\n' +
-    '/tidak - Batal transaksi\n\n' +
-    'Pengaturan:\n' +
-    '/budget [angka] - Set budget\n' +
-    '/slippage [angka] - Set slippage\n\n' +
-    'Analisis:\n' +
-    '/scan - Scan meme coin\n' +
-    '/scalping - Peluang scalping\n' +
-    '/trending - Token trending\n' +
-    '/skills - Kelola skill\n' +
-    '/install [url] - Install skill'
-  );
 });
 
 bot.on('message', async (msg) => {
-  if (msg.text && !msg.text.startsWith('/')) {
-    const chatId = msg.chat.id;
-    bot.sendChatAction(chatId, 'typing');
-    const reply = await chat(chatId, msg.text);
-    bot.sendMessage(chatId, reply);
-  }
+  if (!msg.text || msg.text.startsWith('/')) return;
+  const chatId = msg.chat.id;
+  bot.sendChatAction(chatId, 'typing');
+  const reply = await chat(chatId, msg.text);
+  bot.sendMessage(chatId, reply);
 });
 
-const pendingTrades = new Map();
+// ====================== START ======================
+app.get('/health', (req, res) => res.json({ status: 'ok', wallet: !!wallet }));
 
-app.get('/health', (req, res) => res.json({ status: 'ok', skills: skills.size, settings }));
-
-// Load Solana saat startup
-loadSolana().then(() => {
-  app.listen(config.PORT, () => {
-    console.log('HervBot running on port ' + config.PORT);
-  });
+console.log("🚀 HervBot siap di Railway");
+app.listen(config.PORT, () => {
+  console.log(`✅ Bot berjalan di port ${config.PORT}`);
 });
