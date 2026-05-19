@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const TelegramBot = require('node-telegram-bot-api');
-const { Connection, PublicKey } = require('@solana/web3.js');
 
 const app = express();
 app.use(cors());
@@ -67,7 +66,7 @@ async function loadDefaultSkills() {
   console.log('✅ Default skills loaded:', skills.size);
 }
 
-// ── AI AGENT (menggunakan Groq - GRATIS) ──
+// ── AI AGENT (Groq - GRATIS) ──
 const conversations = new Map();
 
 async function chat(userId, userMessage) {
@@ -104,7 +103,6 @@ ATURAN TRADING:
 Gunakan bahasa Indonesia yang santai. Berikan analisis konkret.`;
 
   try {
-    // Panggil Groq API (gratis, tidak perlu bayar)
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -112,7 +110,7 @@ Gunakan bahasa Indonesia yang santai. Berikan analisis konkret.`;
         'Authorization': `Bearer ${config.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'llama3-70b-8192', // Model gratis dari Groq
+        model: 'llama3-70b-8192',
         max_tokens: 1000,
         messages: [
           { role: 'system', content: systemPrompt },
@@ -144,13 +142,6 @@ AI Trading Agent crypto yang siap membantu kamu trading di:
 • BNB Chain
 • Solana  
 • Base
-
-*Skill aktif:*
-🔥 X Trending Crypto
-⚡ Crypto Scalping Trader
-🚀 Meme Coin Auto Trader
-📡 Morse Translator
-🔐 Caesar Cipher +4
 
 *Perintah:*
 /scan - Scan meme coin terbaik
@@ -253,7 +244,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// ── REST API untuk Web App ──
+// ── REST API ──
 app.post('/api/chat', async (req, res) => {
   const { userId, message } = req.body;
   if (!userId || !message) return res.status(400).json({ error: 'Missing params' });
@@ -267,12 +258,6 @@ app.get('/api/skills', (req, res) => {
     list.push({ name, url: skill.url, active: skill.active });
   }
   res.json(list);
-});
-
-app.post('/api/skills/install', async (req, res) => {
-  const { url } = req.body;
-  const result = await loadSkill(url);
-  res.json(result);
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', skills: skills.size }));
