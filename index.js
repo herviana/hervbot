@@ -79,7 +79,7 @@ async function chat(userId, userMessage) {
         'Authorization': 'Bearer ' + config.GROQ_API_KEY,
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: 'llama3-70b-8192',
         max_tokens: 800,
         messages: [{ role: 'system', content: systemPrompt }, ...history],
       }),
